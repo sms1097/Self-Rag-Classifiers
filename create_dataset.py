@@ -1,6 +1,9 @@
-from datasets import load_dataset
 import re
+
 import pandas as pd
+from datasets import Dataset, load_dataset
+
+HF_TOKEN = ""
 
 
 def split_on_tokens(input_str):
@@ -73,4 +76,10 @@ if __name__ == "__main__":
     output_df = output_df[
         output_df.utility.isin([f"[Utility:{i}]" for i in range(1, 6)])
     ]
-    output_df.to_json("self_rag_tokens_train_data.json")
+    output_df.sample(frac=1)
+
+    ds = Dataset.from_pandas(output_df, split="train")
+    ds.push_to_hub(
+        "sms1097/self_rag_tokens_train_data",
+        token=HF_TOKEN,
+    )
