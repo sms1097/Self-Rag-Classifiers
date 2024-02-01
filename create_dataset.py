@@ -1,9 +1,10 @@
 import re
 
 import pandas as pd
-from datasets import Dataset, load_dataset
+import os
+from datasets import Dataset, load_dataset, DatasetDict
 
-HF_TOKEN = ""
+HF_TOKEN = os.environ["HF_TOKEN"]
 
 
 def split_on_tokens(input_str):
@@ -76,9 +77,10 @@ if __name__ == "__main__":
     output_df = output_df[
         output_df.utility.isin([f"[Utility:{i}]" for i in range(1, 6)])
     ]
-    output_df.sample(frac=1)
+    df = output_df.sample(frac=1)
+    ds = Dataset.from_pandas(df, split="train")
 
-    ds = Dataset.from_pandas(output_df, split="train")
+    df.to_csv("self_rag_tokens_data.csv", index=False)
     ds.push_to_hub(
         "sms1097/self_rag_tokens_train_data",
         token=HF_TOKEN,
