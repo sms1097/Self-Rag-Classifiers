@@ -17,7 +17,7 @@ from transformers import (
 
 
 MODEL = "distilbert-base-uncased"
-BATCH_SIZE = 16
+BATCH_SIZE = 32
 
 
 """
@@ -145,6 +145,13 @@ def compute_metrics(eval_pred):
     predictions = np.argmax(predictions, axis=1)
     return accuracy.compute(predictions=predictions, references=labels)
 
+def optuna_hp_space(trial):
+    return {
+        "learning_rate": trial.suggest_float("learning_rate", 5e-5, 1e-4, log=True),
+        # "per_device_train_batch_size": trial.suggest_categorical("per_device_train_batch_size", [16, 32]),
+
+    }
+
 
 def main(task, sanity_check=False):
     # TODO: SMOTE would be nice on these unbalanced datasets
@@ -168,6 +175,11 @@ def main(task, sanity_check=False):
         MODEL, num_labels=num_labels
     )
 
+    def model_init():
+        return AutoModelForSequenceClassification.from_pretrained(
+            MODEL, num_labels=num_labels
+    )
+
     tokenized_ds = ds.map(lambda x: preprocess_function(x, tokenizer), batched=True)
 
     data_collator = DataCollatorWithPadding(tokenizer=tokenizer)
@@ -178,7 +190,7 @@ def main(task, sanity_check=False):
         learning_rate=2e-5,
         per_device_train_batch_size=BATCH_SIZE,
         per_device_eval_batch_size=BATCH_SIZE,
-        num_train_epochs=5,
+        num_train_epochs=3,
         weight_decay=0.01,
         load_best_model_at_end=True,
         metric_for_best_model="f1",
@@ -187,7 +199,8 @@ def main(task, sanity_check=False):
 
     # TODO: Run some hyperparameter tuning
     trainer_kwargs = dict(
-        model=model,
+        model=None,
+        model_init=model_init,
         args=args,
         train_dataset=tokenized_ds["train"],
         eval_dataset=tokenized_ds["valid"],
@@ -195,16 +208,29 @@ def main(task, sanity_check=False):
         data_collator=data_collator,
         compute_metrics=compute_metrics,
     )
+
     trainer = (
         Trainer(**trainer_kwargs)
         if task != "utility"
         else RegressionTrainer(**trainer_kwargs)
     )
 
-    trainer.train()
+    best_trial = trainer.hyperparameter_search(
+        direction="maximize",
+        backend="optuna",
+        n_trials=4
+    )
 
+
+    for n, v in best_trial.hyperparameters.items():
+        setattr(trainer.args, n, v)
+
+    trainer.train()
+    eval = trainer.evaluate(tokenized_ds['test'])
+    print(eval)
 
 if __name__ == "__main__":
-    target_column = "retrieval"  # ['retrieval', 'relevant', 'support', 'utility']
+    target_columns = ['retrieval', 'relevant', 'support', 'utility']
 
-    main(target_column)
+    for col in target_columns:
+        main(col)
