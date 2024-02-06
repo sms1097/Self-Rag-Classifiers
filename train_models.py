@@ -1,12 +1,10 @@
 import numpy as np
 import torch
 
-from sklearn.metrics import mean_absolute_error
-from sklearn.metrics import mean_squared_error
-from sklearn.metrics import r2_score
 import pandas as pd
 import evaluate
-from datasets import Dataset, DatasetDict
+from datasets import Dataset, DatasetDict, load_dataset
+from sklearn.metrics import r2_score, mean_absolute_error, mean_squared_error
 from transformers import (
     AutoModelForSequenceClassification,
     AutoTokenizer,
@@ -17,7 +15,7 @@ from transformers import (
 
 
 MODEL = "distilbert-base-uncased"
-BATCH_SIZE = 32
+BATCH_SIZE = 64
 
 
 """
@@ -73,8 +71,14 @@ def train_test_split(df, holdout_frac=0.1):
     )
 
 
+def load_tokens_data():
+    ds = load_dataset("sms1097/self_rag_tokens_train_data")
+    df = pd.DataFrame(ds.to_dicst)
+    return df
+
+
 def load_retrieval_ds():
-    df = pd.read_csv("self_rag_tokens_data.csv")
+    df = load_tokens_data()
     retrieval_df = df[~df["retrieval"].isna()]
     retrieval_df = retrieval_df[["instruction", "retrieval"]]
     retrieval_df["retrieval"] = retrieval_df["retrieval"].apply(
@@ -86,7 +90,7 @@ def load_retrieval_ds():
 
 
 def load_relevant_ds():
-    df = pd.read_csv("self_rag_tokens_data.csv")
+    df = load_tokens_data()
     relevant_df = df[~df.relevant.isna()]
     relevant_df["text"] = df.apply(
         lambda row: f"Instruction:\n{row['instruction']}\nContext:\n{row['doc']}",
@@ -101,12 +105,12 @@ def load_relevant_ds():
 def load_support_ds():
     # Support
     support_map = {
-        "[Fully supported]": 2,
-        "[Partially supported]": 1,
-        "[No support / Contradictory]": 0,
+        "[Fully supported]": 3.,
+        "[Partially supported]": 2.,
+        "[No support / Contradictory]": 1.,
     }
 
-    df = pd.read_csv("self_rag_tokens_data.csv")
+    df = load_tokens_data()
     support_df = df[~df.support.isna()]
     support_df["text"] = support_df.apply(
         lambda row: f"Context: {row['doc']}\nAnswer: {row['answer']}", axis=1
@@ -120,14 +124,14 @@ def load_support_ds():
 
 def load_utility_ds():
     # Utility
-    df = pd.read_csv("self_rag_tokens_data.csv")
+    df = load_tokens_data()
     utility_df = df[~df["utility"].isna()]
     utility_df["text"] = df.apply(
         lambda row: f"Instruction: {row['instruction']}\nAnswer: {row['answer']}",
         axis=1,
     )
     utility_df["utility"] = utility_df["utility"].apply(
-        lambda x: int(x.lstrip("[Utility:").rstrip("]"))
+        lambda x: float(x.lstrip("[Utility:").rstrip("]"))
     )
     utility_df = utility_df[["text", "utility"]]
     utility_df.columns = ["text", "label"]
@@ -145,30 +149,30 @@ def compute_metrics(eval_pred):
     predictions = np.argmax(predictions, axis=1)
     return accuracy.compute(predictions=predictions, references=labels)
 
+
 def optuna_hp_space(trial):
     return {
         "learning_rate": trial.suggest_float("learning_rate", 5e-5, 1e-4, log=True),
         # "per_device_train_batch_size": trial.suggest_categorical("per_device_train_batch_size", [16, 32]),
-
     }
 
 
-def main(task, sanity_check=False):
+def main(target_column,run_tuning=False):
     # TODO: SMOTE would be nice on these unbalanced datasets
-    if task == "retrieval":
+    if target_column == "retrieval":
         ds = load_retrieval_ds()
         num_labels = 2
-    elif task == "relevant":
+    elif target_column == "relevant":
         ds = load_retrieval_ds()
         num_labels = 2
-    elif task == "support":
+    elif target_column == "support":
         ds = load_support_ds()
-        num_labels = 3
-    elif task == "utility":
+        num_labels = 1
+    elif target_column == "utility":
         ds = load_utility_ds()
-        num_labels = 5
+        num_labels = 1
     else:
-        raise Exception(f"unsupported task of value '{task}'")
+        raise Exception(f"unsupported task of value '{target_column}'")
 
     tokenizer = AutoTokenizer.from_pretrained("distilbert-base-uncased")
     model = AutoModelForSequenceClassification.from_pretrained(
@@ -178,7 +182,7 @@ def main(task, sanity_check=False):
     def model_init():
         return AutoModelForSequenceClassification.from_pretrained(
             MODEL, num_labels=num_labels
-    )
+        )
 
     tokenized_ds = ds.map(lambda x: preprocess_function(x, tokenizer), batched=True)
 
@@ -190,47 +194,55 @@ def main(task, sanity_check=False):
         learning_rate=2e-5,
         per_device_train_batch_size=BATCH_SIZE,
         per_device_eval_batch_size=BATCH_SIZE,
-        num_train_epochs=3,
+        num_train_epochs=5,
         weight_decay=0.01,
         load_best_model_at_end=True,
-        metric_for_best_model="f1",
+        metric_for_best_model="f1" if target_column in ["retrieval", "relevant"] else 'accuracy',
         push_to_hub=True,
     )
 
     # TODO: Run some hyperparameter tuning
     trainer_kwargs = dict(
-        model=None,
-        model_init=model_init,
+        # model=None,
+        model=model,
+        # model_init=model_init,
         args=args,
         train_dataset=tokenized_ds["train"],
         eval_dataset=tokenized_ds["valid"],
         tokenizer=tokenizer,
         data_collator=data_collator,
-        compute_metrics=compute_metrics,
+        compute_metrics=(
+            compute_metrics
+            if target_column in ["retrieval", "relevant"]
+            else compute_metrics_for_regression
+        ),
     )
 
     trainer = (
         Trainer(**trainer_kwargs)
-        if task != "utility"
+        if target_column in ['retrieval', 'relevant']
         else RegressionTrainer(**trainer_kwargs)
     )
 
-    best_trial = trainer.hyperparameter_search(
-        direction="maximize",
-        backend="optuna",
-        n_trials=4
-    )
 
+    if run_tuning:
+        best_trial = trainer.hyperparameter_search(
+            direction="maximize",
+            backend="optuna",
+            n_trials=4
+        )
 
-    for n, v in best_trial.hyperparameters.items():
-        setattr(trainer.args, n, v)
+        for n, v in best_trial.hyperparameters.items():
+            setattr(trainer.args, n, v)
 
     trainer.train()
-    eval = trainer.evaluate(tokenized_ds['test'])
-    print(eval)
+    trainer.eval_dataset=tokenized_ds["test"]
+    print(trainer.evaluate())
+
+
 
 if __name__ == "__main__":
-    target_columns = ['retrieval', 'relevant', 'support', 'utility']
+    target_columns = ["utility"]
 
     for col in target_columns:
         main(col)
