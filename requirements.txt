@@ -3,3 +3,4 @@ transformers
 evaluate
 accelerate
 optuna
+scikit-learn

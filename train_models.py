@@ -73,7 +73,7 @@ def train_test_split(df, holdout_frac=0.1):
 
 def load_tokens_data():
     ds = load_dataset("sms1097/self_rag_tokens_train_data")
-    df = pd.DataFrame(ds.to_dicst)
+    df = pd.DataFrame(ds['train'].to_dict())
     return df
 
 
